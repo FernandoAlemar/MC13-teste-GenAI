@@ -7,7 +7,7 @@ O cenário é a integração entre dois componentes:
 - consumidor: sistema externo de compras;
 - provedor: `GET /protheus/com/produtosfornecedor`.
 
-Não há token de produção, CNPJ, rota real nem fonte do ERP.
+Não há token de produção, CNPJ, rota real nem fonte de produção do ERP.
 
 ## Tipos de prompt
 
@@ -23,3 +23,11 @@ Cada arquivo guarda a versão vaga, o que ela produziu e a versão ajustada.
 [casos/integracao-produtos-fornecedor.md](casos/integracao-produtos-fornecedor.md)
 
 São casos da fronteira HTTP: código, mensagem e itens. Esta suíte não compila TLPP e não executa a consulta SQL no banco.
+## Atividade anterior
+
+O prompt do agente e a API fictícia gerada na atividade anterior estão em [atividade-anterior](atividade-anterior/):
+
+- [prompt-agente-desenvolvedor.md](atividade-anterior/prompt-agente-desenvolvedor.md)
+- [produtosfornecedor.tlpp](atividade-anterior/produtosfornecedor.tlpp)
+
+O fonte consulta `GET /protheus/com/produtosfornecedor`. Ele usa somente a massa e o token de teste da Aurora.

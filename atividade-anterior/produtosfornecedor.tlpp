@@ -1,0 +1,742 @@
+#include 'tlpp-core.th'
+#include 'tlpp-rest.th'
+#INCLUDE "TOTVS.CH"
+#INCLUDE "PROTHEUS.CH"
+#INCLUDE "TBICONN.CH"
+#INCLUDE "TOPCONN.CH"
+
+/*
+------------------------------------------------------------------------------------------------------------
+program     : produtosfornecedor.tlpp
+Funcao      : getPrdForn
+Tipo        : Metodo GET - /protheus/com/produtosfornecedor
+Descricao   : Consulta os produtos vinculados a um fornecedor da Distribuidora Aurora Ltda.
+              Le a amarração SA5 na filial e na loja informadas e completa o item com o cadastro SB1.
+              Produto inativo (B1_MSBLQL = '1') fica de fora.
+              Produto sem preco permanece na consulta.
+              Cada item devolve precoVenda (B1_PRV1) e custoStandard (B1_CUSTD), alem da unidade (B1_UM).
+              O periodo, quando as duas datas vem no body, filtra a data de inclusao do cadastro.
+              Essa data e decodificada do log B1_USERLGI (base 01/01/1996, posicoes 12 e 16,
+              com 10000 dias quando a posicao 8 e '<'). Nao existe coluna de data de cadastro no SB1.
+
+Parametros  :
+              - Header 'api-token' (Character): token comparado a MV_APITOK, sem gravar o valor (Obrigatorio)
+              - Query Param 'startline' (Character): linha inicial da pagina ja filtrada. Ausente = 1
+              - Query Param 'lineperpage' (Character): linhas da pagina, de 1 a 100. Ausente = 100
+
+              - Body Params
+                {
+                    "filial": "0101",
+                    "loja": "01",
+                    "codigoFornecedor": "AUR001",
+                    "codigoProduto": "AUR-OLEO-900",
+                    "descricao": "Feijao",
+                    "dataInicial": "20260101",
+                    "dataFinal": "20260331"
+                }
+
+Retorno     : JSON via oRest:setResponse, com Code, Message e itens.
+              O HTTP sai somente de oRest:setStatusCode. O metodo devolve .T. em todo caminho.
+
+Exemplo de Chamada:
+GET /protheus/com/produtosfornecedor?startline=1&lineperpage=100
+Header api-token: aurora-token-teste
+Body: { "filial": "0101", "loja": "01", "codigoFornecedor": "AUR001", "codigoProduto": "AUR-OLEO-900" }
+
+Estrutura Retorno:
+{
+    "Code": 200,
+    "Message": "Solicitacao concluida - 1 registros",
+    "itens": [
+        {
+            "codigoProduto": "AUR-OLEO-900",
+            "descricao": "Oleo de Soja Aurora",
+            "unidade": "UN",
+            "precoVenda": 0,
+            "custoStandard": 0,
+            "codigoFornecedor": "AUR001"
+        }
+    ]
+}
+------------------------------------------------------------------------------------------------------------
+Atualizacoes:
+- 10/2026 - Aurora Suprimentos - Consulta de produtos vinculados ao fornecedor
+------------------------------------------------------------------------------------------------------------
+*/
+
+Static START_LINE_DEFAULT    := 1
+Static LINE_PER_PAGE_DEFAULT := 100
+Static LINE_PER_PAGE_MAX     := 100
+Static FILIAL_TAM            := 4
+Static LOJA_TAM              := 2
+Static FORNECEDOR_TAM        := 6
+Static PRODUTO_TAM_MIN       := 1
+Static PRODUTO_TAM_MAX       := 15
+Static DESCRICAO_TAM_MIN     := 3
+Static DESCRICAO_TAM_MAX     := 40
+Static DATA_TAM              := 8
+Static PERIODO_MAX_DIAS      := 365
+
+Static HTTP_STATUS_OK           := 200
+Static HTTP_STATUS_BAD_REQUEST  := 400
+Static HTTP_STATUS_UNAUTHORIZED := 401
+Static HTTP_STATUS_FORBIDDEN    := 403
+Static HTTP_STATUS_NOT_FOUND    := 404
+Static HTTP_STATUS_ERROR        := 500
+
+/*/{Protheus.doc} getPrdForn
+Consulta paginada dos produtos vinculados ao fornecedor.
+@type function
+@author Aurora Suprimentos
+@since 08/10/2026
+/*/
+@Get("/protheus/com/produtosfornecedor")
+User Function getPrdForn()
+
+    Local cRetJson       := "" as character
+    Local cBody          := "" as character
+    Local cParse         := "" as character
+    Local cApiToken      := "" as character
+    Local cTokenAtual    := "" as character
+    Local cStart         := "" as character
+    Local cLinhas        := "" as character
+    Local cFilial        := "" as character
+    Local cLoja          := "" as character
+    Local cFornecedor    := "" as character
+    Local cProduto       := "" as character
+    Local cDescricao     := "" as character
+    Local cDataInicial   := "" as character
+    Local cDataFinal     := "" as character
+    Local cFiltraProduto := "N" as character
+    Local cFiltraDescricao := "N" as character
+    Local cFiltraPeriodo := "N" as character
+    Local cAlias         := "" as character
+    Local cFilBkp        := "" as character
+    Local cErroLog       := "" as character
+    Local cIdTransacao   := "" as character
+    Local nStartLine     := 0 as numeric
+    Local nLinePerPage   := 0 as numeric
+    Local nCode          := 0 as numeric
+    Local lTratado       := .F. as logical
+    Local lJsonOk        := .F. as logical
+    Local aPagina        := {0, 0} as array
+    Local oRetGet        := NIL as object
+    Local oErro          := NIL as object
+    Local oHeader        := NIL as object
+    Local oQuery         := NIL as object
+    Local oBody          := NIL as object
+    Local bErroAnt       := NIL
+
+    bErroAnt := ErrorBlock({|oErro| cErroLog := oErro:Description + " " + oErro:ErrorStack, Break(oErro)})
+
+    BEGIN SEQUENCE
+
+        cFilBkp      := cFilAnt
+        cIdTransacao := DToS(Date()) + StrTran(Time(), ":", "") + cValToChar(ThreadId())
+        oRest:setKeyHeaderResponse("Content-Type", "application/json", "charset=utf-8")
+
+        oHeader     := oRest:getHeaderRequest()
+        oQuery      := oRest:getQueryRequest()
+        cBody       := oRest:getBodyRequest()
+        cTokenAtual := GetMV("MV_APITOK", .F., "")
+        If cTokenAtual == NIL
+            cTokenAtual := ""
+        Else
+            cTokenAtual := AllTrim(cValToChar(cTokenAtual))
+        EndIf
+        cApiToken   := TextoHeader(oHeader, "api-token")
+        cStart      := TextoQuery(oQuery, "startline")
+        cLinhas     := TextoQuery(oQuery, "lineperpage")
+
+        oErro := ValidToken(cTokenAtual, cApiToken)
+        If oErro != NIL
+            oRetGet  := oErro
+            lTratado := .T.
+            BREAK
+        EndIf
+
+        oErro := ValidPaginacao(cStart, cLinhas, aPagina)
+        If oErro != NIL
+            oRetGet  := oErro
+            lTratado := .T.
+            BREAK
+        EndIf
+        nStartLine   := aPagina[1]
+        nLinePerPage := aPagina[2]
+
+        If cBody == NIL
+            cBody := ""
+        EndIf
+
+        oBody   := JsonObject():New()
+        lJsonOk := .F.
+        BEGIN SEQUENCE
+            cParse := oBody:fromJson(cBody)
+            If ValType(cParse) == "C"
+                BREAK
+            EndIf
+            lJsonOk := .T.
+        RECOVER
+            lJsonOk := .F.
+        END SEQUENCE
+
+        If !lJsonOk
+            oRetGet  := SetRetorno(oRetGet, HTTP_STATUS_BAD_REQUEST, "Body JSON invalido", {})
+            lTratado := .T.
+            BREAK
+        EndIf
+
+        cFilial      := Upper(TextoBody(oBody, "filial"))
+        cLoja        := Upper(TextoBody(oBody, "loja"))
+        cFornecedor  := Upper(TextoBody(oBody, "codigoFornecedor"))
+        cProduto     := TextoBody(oBody, "codigoProduto")
+        cDescricao   := TextoBody(oBody, "descricao")
+        cDataInicial := TextoBody(oBody, "dataInicial")
+        cDataFinal   := TextoBody(oBody, "dataFinal")
+
+        oErro := ValidFilial(cFilial)
+        If oErro != NIL
+            oRetGet  := oErro
+            lTratado := .T.
+            BREAK
+        EndIf
+
+        oErro := ValidLoja(cLoja)
+        If oErro != NIL
+            oRetGet  := oErro
+            lTratado := .T.
+            BREAK
+        EndIf
+
+        oErro := ValidFornecedor(cFornecedor)
+        If oErro != NIL
+            oRetGet  := oErro
+            lTratado := .T.
+            BREAK
+        EndIf
+
+        oErro := ValidProduto(cProduto)
+        If oErro != NIL
+            oRetGet  := oErro
+            lTratado := .T.
+            BREAK
+        EndIf
+
+        oErro := ValidDescricao(cDescricao)
+        If oErro != NIL
+            oRetGet  := oErro
+            lTratado := .T.
+            BREAK
+        EndIf
+
+        oErro := ValidPeriodo(cDataInicial, cDataFinal)
+        If oErro != NIL
+            oRetGet  := oErro
+            lTratado := .T.
+            BREAK
+        EndIf
+
+        cFilAnt := cFilial
+
+        If !Empty(cProduto)
+            cFiltraProduto := "S"
+        EndIf
+        If !Empty(cDescricao)
+            cFiltraDescricao := "S"
+        EndIf
+        If !Empty(cDataInicial) .And. !Empty(cDataFinal)
+            cFiltraPeriodo := "S"
+        EndIf
+
+        cFornecedor := AspasSql(cFornecedor)
+        cLoja       := AspasSql(cLoja)
+        cProduto    := AspasSql(cProduto)
+        cDescricao  := PrepararDescricao(cDescricao)
+
+        cAlias  := GetNextAlias()
+        ExecutaConsulta(cAlias, cFornecedor, cLoja, cProduto, cDescricao, cDataInicial, cDataFinal, cFiltraProduto, cFiltraDescricao, cFiltraPeriodo, nStartLine, nLinePerPage)
+        oRetGet := MontaItens(cAlias)
+
+    RECOVER
+
+        If !lTratado
+            oRetGet := SetRetorno(oRetGet, HTTP_STATUS_ERROR, "Falha nao prevista na consulta", {})
+        EndIf
+
+    END SEQUENCE
+
+    ErrorBlock(bErroAnt)
+
+    FechaAlias(cAlias)
+    cFilAnt := cFilBkp
+
+    If oRetGet == NIL .Or. oRetGet["Code"] == NIL
+        oRetGet := SetRetorno(oRetGet, HTTP_STATUS_ERROR, "Falha nao prevista na consulta", {})
+    EndIf
+
+    GravaLog(cIdTransacao, oRetGet["Code"], oRetGet["Message"], cErroLog)
+
+    nCode    := oRetGet["Code"]
+    cRetJson := oRetGet:toJson()
+    oRest:setStatusCode(nCode)
+    oRest:setResponse(cRetJson)
+
+    FreeObj(oRetGet)
+    If oBody != NIL
+        FreeObj(oBody)
+    EndIf
+
+Return .T.
+
+/*/{Protheus.doc} ValidToken
+Interrompe na primeira falha: parametro vazio, header ausente e token diferente.
+@type function
+@author Aurora Suprimentos
+@since 08/10/2026
+/*/
+Static Function ValidToken(cTokenAtual, cApiToken)
+
+    If Empty(cTokenAtual)
+        Return BuildResponse(HTTP_STATUS_BAD_REQUEST, "Parametro de token nao configurado", {})
+    EndIf
+
+    If Empty(cApiToken)
+        Return BuildResponse(HTTP_STATUS_UNAUTHORIZED, "Header api-token ausente ou vazio", {})
+    EndIf
+
+    If AllTrim(cApiToken) <> AllTrim(cTokenAtual)
+        Return BuildResponse(HTTP_STATUS_FORBIDDEN, "Token diferente do parametro", {})
+    EndIf
+
+Return NIL
+
+/*/{Protheus.doc} ValidPaginacao
+Aceita somente digitos. Ausente usa 1 e 100. startline minimo 1. lineperpage de 1 a 100.
+@type function
+@author Aurora Suprimentos
+@since 08/10/2026
+/*/
+Static Function ValidPaginacao(cStart, cLinhas, aPagina)
+
+    Local nStartLine   := 0 as numeric
+    Local nLinePerPage := 0 as numeric
+
+    If Empty(cStart)
+        nStartLine := START_LINE_DEFAULT
+    ElseIf !SoDigitos(cStart)
+        Return BuildResponse(HTTP_STATUS_BAD_REQUEST, "Paginacao invalida", {})
+    Else
+        nStartLine := Val(cStart)
+    EndIf
+
+    If Empty(cLinhas)
+        nLinePerPage := LINE_PER_PAGE_DEFAULT
+    ElseIf !SoDigitos(cLinhas)
+        Return BuildResponse(HTTP_STATUS_BAD_REQUEST, "Paginacao invalida", {})
+    Else
+        nLinePerPage := Val(cLinhas)
+    EndIf
+
+    If nStartLine < 1 .Or. nLinePerPage < 1 .Or. nLinePerPage > LINE_PER_PAGE_MAX
+        Return BuildResponse(HTTP_STATUS_BAD_REQUEST, "Paginacao invalida", {})
+    EndIf
+
+    aPagina[1] := nStartLine
+    aPagina[2] := nLinePerPage
+
+Return NIL
+
+/*/{Protheus.doc} ValidFilial
+Filial obrigatoria, com 4 caracteres alfanumericos, comparada em maiusculas.
+@type function
+@author Aurora Suprimentos
+@since 08/10/2026
+/*/
+Static Function ValidFilial(cFilial)
+
+    If Len(cFilial) != FILIAL_TAM .Or. !AlfaNumerico(cFilial)
+        Return BuildResponse(HTTP_STATUS_BAD_REQUEST, "filial invalida", {})
+    EndIf
+
+Return NIL
+
+/*/{Protheus.doc} ValidLoja
+Loja obrigatoria, com 2 caracteres alfanumericos, comparada em maiusculas.
+@type function
+@author Aurora Suprimentos
+@since 08/10/2026
+/*/
+Static Function ValidLoja(cLoja)
+
+    If Len(cLoja) != LOJA_TAM .Or. !AlfaNumerico(cLoja)
+        Return BuildResponse(HTTP_STATUS_BAD_REQUEST, "loja invalida", {})
+    EndIf
+
+Return NIL
+
+/*/{Protheus.doc} ValidFornecedor
+Codigo do fornecedor obrigatorio, com 6 caracteres alfanumericos, em maiusculas.
+@type function
+@author Aurora Suprimentos
+@since 08/10/2026
+/*/
+Static Function ValidFornecedor(cFornecedor)
+
+    If Len(cFornecedor) != FORNECEDOR_TAM .Or. !AlfaNumerico(cFornecedor)
+        Return BuildResponse(HTTP_STATUS_BAD_REQUEST, "codigoFornecedor invalido", {})
+    EndIf
+
+Return NIL
+
+/*/{Protheus.doc} ValidProduto
+Codigo do produto opcional. Se informado, de 1 a 15 caracteres entre letra, digito e hifen.
+@type function
+@author Aurora Suprimentos
+@since 08/10/2026
+/*/
+Static Function ValidProduto(cProduto)
+
+    If Empty(cProduto)
+        Return NIL
+    EndIf
+
+    If Len(cProduto) < PRODUTO_TAM_MIN .Or. Len(cProduto) > PRODUTO_TAM_MAX .Or. !CodigoProdutoOk(cProduto)
+        Return BuildResponse(HTTP_STATUS_BAD_REQUEST, "codigoProduto invalido", {})
+    EndIf
+
+Return NIL
+
+/*/{Protheus.doc} ValidDescricao
+Descricao opcional. Se informada, de 3 a 40 caracteres.
+@type function
+@author Aurora Suprimentos
+@since 08/10/2026
+/*/
+Static Function ValidDescricao(cDescricao)
+
+    If Empty(cDescricao)
+        Return NIL
+    EndIf
+
+    If Len(cDescricao) < DESCRICAO_TAM_MIN .Or. Len(cDescricao) > DESCRICAO_TAM_MAX
+        Return BuildResponse(HTTP_STATUS_BAD_REQUEST, "descricao invalida", {})
+    EndIf
+
+Return NIL
+
+/*/{Protheus.doc} ValidPeriodo
+As duas datas juntas ou nenhuma. Final maior ou igual a inicial, ate hoje, no maximo 365 dias.
+@type function
+@author Aurora Suprimentos
+@since 08/10/2026
+/*/
+Static Function ValidPeriodo(cDataInicial, cDataFinal)
+
+    Local dInicial := CtoD("") as date
+    Local dFinal   := CtoD("") as date
+
+    If Empty(cDataInicial) .And. Empty(cDataFinal)
+        Return NIL
+    EndIf
+
+    If Empty(cDataInicial) .Or. Empty(cDataFinal) .Or. !DataYmdOk(cDataInicial) .Or. !DataYmdOk(cDataFinal)
+        Return BuildResponse(HTTP_STATUS_BAD_REQUEST, "Periodo invalido", {})
+    EndIf
+
+    dInicial := StoD(cDataInicial)
+    dFinal   := StoD(cDataFinal)
+
+    If dFinal < dInicial .Or. dFinal > Date() .Or. (dFinal - dInicial) > PERIODO_MAX_DIAS
+        Return BuildResponse(HTTP_STATUS_BAD_REQUEST, "Periodo invalido", {})
+    EndIf
+
+Return NIL
+
+/*/{Protheus.doc} ExecutaConsulta
+Le SA5 e SB1 com filial de xFilial, paginacao por ROW_NUMBER e filtros por parametro.
+@type function
+@author Aurora Suprimentos
+@since 08/10/2026
+/*/
+Static Function ExecutaConsulta(cAlias, cFornecedor, cLoja, cProduto, cDescricao, cDataInicial, cDataFinal, cFiltraProduto, cFiltraDescricao, cFiltraPeriodo, nStartLine, nLinePerPage)
+
+    BeginSQL Alias cAlias
+
+        SELECT X.B1_COD, X.B1_DESC, X.B1_UM, X.B1_PRV1, X.B1_CUSTD, X.A5_FORNECE
+          FROM (
+                SELECT SB1.B1_COD, SB1.B1_DESC, SB1.B1_UM, SB1.B1_PRV1, SB1.B1_CUSTD, SA5.A5_FORNECE
+                      ,ROW_NUMBER() OVER (ORDER BY SB1.B1_COD, SA5.R_E_C_N_O_) AS LINHA
+                  FROM %table:SA5% SA5
+                 INNER JOIN %table:SB1% SB1
+                    ON SB1.B1_FILIAL = %xfilial:SB1%
+                   AND SB1.B1_COD = SA5.A5_PRODUTO
+                   AND SB1.%notDel%
+                 WHERE SA5.%notDel%
+                   AND SA5.A5_FILIAL = %xfilial:SA5%
+                   AND RTRIM(SA5.A5_FORNECE) = %exp:cFornecedor%
+                   AND RTRIM(SA5.A5_LOJA) = %exp:cLoja%
+                   AND SB1.B1_MSBLQL <> '1'
+                   AND (%exp:cFiltraProduto% = 'N' OR RTRIM(SB1.B1_COD) = %exp:cProduto%)
+                   AND (%exp:cFiltraDescricao% = 'N' OR UPPER(SB1.B1_DESC) LIKE CHAR(37) + REPLACE(REPLACE(REPLACE(UPPER(%exp:cDescricao%), CHAR(1), '\\'), CHAR(2), '\' + CHAR(37)), CHAR(3), '\_') + CHAR(37) ESCAPE '\')
+                   AND (%exp:cFiltraPeriodo% = 'N' OR CASE WHEN RTRIM(SB1.B1_USERLGI) = '' THEN '00000000' ELSE CONVERT(char(8), DATEADD(DAY, CONVERT(int, CONCAT(ASCII(SUBSTRING(SB1.B1_USERLGI, 12, 1)) - 50, ASCII(SUBSTRING(SB1.B1_USERLGI, 16, 1)) - 50) + CASE WHEN SUBSTRING(SB1.B1_USERLGI, 8, 1) = '<' THEN 10000 ELSE 0 END), CONVERT(datetime, '19960101', 112)), 112) END BETWEEN %exp:cDataInicial% AND %exp:cDataFinal%)
+               ) X
+         WHERE X.LINHA BETWEEN %exp:nStartLine% AND (%exp:nStartLine% + (%exp:nLinePerPage% - 1))
+    EndSQL
+
+Return
+
+/*/{Protheus.doc} MontaItens
+Monta o envelope com os itens da pagina ou 404 quando a pagina vem vazia.
+@type function
+@author Aurora Suprimentos
+@since 08/10/2026
+/*/
+Static Function MontaItens(cAlias)
+
+    Local aItens := {} as array
+    Local oItem  := NIL as object
+    Local nQtd   := 0 as numeric
+
+    (cAlias)->(DbGoTop())
+    While !(cAlias)->(Eof())
+        oItem := JsonObject():New()
+        oItem["codigoProduto"]    := AllTrim((cAlias)->B1_COD)
+        oItem["descricao"]        := AllTrim((cAlias)->B1_DESC)
+        oItem["unidade"]          := AllTrim((cAlias)->B1_UM)
+        oItem["precoVenda"]       := (cAlias)->B1_PRV1
+        oItem["custoStandard"]    := (cAlias)->B1_CUSTD
+        oItem["codigoFornecedor"] := AllTrim((cAlias)->A5_FORNECE)
+        AAdd(aItens, oItem)
+        (cAlias)->(DbSkip())
+    EndDo
+
+    nQtd := Len(aItens)
+    If nQtd == 0
+        Return BuildResponse(HTTP_STATUS_NOT_FOUND, "Nao ha dados para o filtro informado", {})
+    EndIf
+
+Return BuildResponse(HTTP_STATUS_OK, "Solicitacao concluida - " + cValToChar(nQtd) + " registros", aItens)
+
+/*/{Protheus.doc} BuildResponse
+Envelope Code, Message e itens.
+@type function
+@author Aurora Suprimentos
+@since 08/10/2026
+/*/
+Static Function BuildResponse(nCode, cMessage, aItens)
+
+    Local oRet := JsonObject():New() as object
+
+    oRet["Code"]    := nCode
+    oRet["Message"] := cMessage
+    oRet["itens"]   := aItens
+
+Return oRet
+
+/*/{Protheus.doc} SetRetorno
+Substitui o envelope anterior e libera o objeto trocado.
+@type function
+@author Aurora Suprimentos
+@since 08/10/2026
+/*/
+Static Function SetRetorno(oAtual, nCode, cMessage, aItens)
+
+    If oAtual != NIL
+        FreeObj(oAtual)
+    EndIf
+
+Return BuildResponse(nCode, cMessage, aItens)
+
+/*/{Protheus.doc} GravaLog
+Registra o identificador da transacao e o resultado. O token nao entra no log.
+@type function
+@author Aurora Suprimentos
+@since 08/10/2026
+/*/
+Static Function GravaLog(cIdTransacao, nCode, cMessage, cErroLog)
+
+    Local cTexto := cIdTransacao + " | Code " + cValToChar(nCode) + " | " + cMessage as character
+
+    If nCode == HTTP_STATUS_ERROR .And. !Empty(cErroLog)
+        cTexto += " | " + cErroLog
+    EndIf
+
+    BEGIN SEQUENCE
+        FwLogMsg("REST", "COM", "PRODUTOSFORNECEDOR", cIdTransacao, NIL, IIf(nCode >= HTTP_STATUS_ERROR, 2, 1), cTexto, .T.)
+    RECOVER
+    END SEQUENCE
+
+Return
+
+/*/{Protheus.doc} FechaAlias
+Fecha a workarea aberta pela consulta.
+@type function
+@author Aurora Suprimentos
+@since 08/10/2026
+/*/
+Static Function FechaAlias(cAlias)
+
+    If !Empty(cAlias) .And. Select(cAlias) > 0
+        (cAlias)->(DbCloseArea())
+    EndIf
+
+Return
+
+/*/{Protheus.doc} TextoHeader
+Le um header e devolve o texto sem espaços nas extremidades.
+@type function
+@author Aurora Suprimentos
+@since 08/10/2026
+/*/
+Static Function TextoHeader(oHeader, cChave)
+
+    Local cValor := "" as character
+
+    If oHeader != NIL .And. oHeader[cChave] != NIL
+        cValor := AllTrim(cValToChar(oHeader[cChave]))
+    EndIf
+
+Return cValor
+
+/*/{Protheus.doc} TextoQuery
+Le um parametro de query e devolve o texto sem espaços nas extremidades.
+@type function
+@author Aurora Suprimentos
+@since 08/10/2026
+/*/
+Static Function TextoQuery(oQuery, cChave)
+
+    Local cValor := "" as character
+
+    If oQuery != NIL .And. oQuery[cChave] != NIL
+        cValor := AllTrim(cValToChar(oQuery[cChave]))
+    EndIf
+
+Return cValor
+
+/*/{Protheus.doc} TextoBody
+Le um campo do body e devolve o texto sem espaços nas extremidades.
+@type function
+@author Aurora Suprimentos
+@since 08/10/2026
+/*/
+Static Function TextoBody(oBody, cChave)
+
+    Local cValor := "" as character
+    Local xValor := NIL
+
+    xValor := oBody[cChave]
+    If xValor != NIL
+        cValor := AllTrim(cValToChar(xValor))
+    EndIf
+
+Return cValor
+
+/*/{Protheus.doc} DataYmdOk
+Confere YYYYMMDD e a existencia da data no calendario.
+@type function
+@author Aurora Suprimentos
+@since 08/10/2026
+/*/
+Static Function DataYmdOk(cData)
+
+    Local lOk   := .F. as logical
+    Local dData := CtoD("") as date
+
+    If Len(cData) == DATA_TAM .And. SoDigitos(cData)
+        dData := StoD(cData)
+        lOk   := !Empty(dData) .And. DToS(dData) == cData
+    EndIf
+
+Return lOk
+
+/*/{Protheus.doc} SoDigitos
+Indica se o texto contem somente digitos.
+@type function
+@author Aurora Suprimentos
+@since 08/10/2026
+/*/
+Static Function SoDigitos(cTexto)
+
+    Local nI   := 0 as numeric
+    Local lOk  := !Empty(cTexto) as logical
+    Local cCar := "" as character
+
+    For nI := 1 To Len(cTexto)
+        cCar := SubStr(cTexto, nI, 1)
+        If cCar < "0" .Or. cCar > "9"
+            lOk := .F.
+            Exit
+        EndIf
+    Next nI
+
+Return lOk
+
+/*/{Protheus.doc} AlfaNumerico
+Indica se o texto contem somente letras e digitos.
+@type function
+@author Aurora Suprimentos
+@since 08/10/2026
+/*/
+Static Function AlfaNumerico(cTexto)
+
+    Local nI   := 0 as numeric
+    Local lOk  := !Empty(cTexto) as logical
+    Local cCar := "" as character
+
+    For nI := 1 To Len(cTexto)
+        cCar := SubStr(cTexto, nI, 1)
+        If !((cCar >= "0" .And. cCar <= "9") .Or. (cCar >= "A" .And. cCar <= "Z"))
+            lOk := .F.
+            Exit
+        EndIf
+    Next nI
+
+Return lOk
+
+/*/{Protheus.doc} CodigoProdutoOk
+Indica se o codigo tem somente letra, digito ou hifen.
+@type function
+@author Aurora Suprimentos
+@since 08/10/2026
+/*/
+Static Function CodigoProdutoOk(cTexto)
+
+    Local nI   := 0 as numeric
+    Local lOk  := !Empty(cTexto) as logical
+    Local cCar := "" as character
+
+    For nI := 1 To Len(cTexto)
+        cCar := SubStr(cTexto, nI, 1)
+        If cCar != "-" .And. !((cCar >= "0" .And. cCar <= "9") .Or. (cCar >= "A" .And. cCar <= "Z") .Or. (cCar >= "a" .And. cCar <= "z"))
+            lOk := .F.
+            Exit
+        EndIf
+    Next nI
+
+Return lOk
+
+/*/{Protheus.doc} AspasSql
+Dobra aspas simples do valor enviado ao parametro do BeginSQL.
+@type function
+@author Aurora Suprimentos
+@since 08/10/2026
+/*/
+Static Function AspasSql(cTexto)
+
+Return StrTran(cTexto, "'", "''")
+
+/*/{Protheus.doc} PrepararDescricao
+Troca barra, percentual e sublinhado por caracteres de controle para o LIKE literal.
+@type function
+@author Aurora Suprimentos
+@since 08/10/2026
+/*/
+Static Function PrepararDescricao(cTexto)
+
+    cTexto := AspasSql(cTexto)
+    cTexto := StrTran(cTexto, "\", Chr(1))
+    cTexto := StrTran(cTexto, "%", Chr(2))
+    cTexto := StrTran(cTexto, "_", Chr(3))
+
+Return cTexto
