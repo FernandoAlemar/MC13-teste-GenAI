@@ -23,11 +23,11 @@ Cada arquivo guarda a versão vaga, o que ela produziu e a versão ajustada.
 [casos/integracao-produtos-fornecedor.md](casos/integracao-produtos-fornecedor.md)
 
 São casos da fronteira HTTP: código, mensagem e itens. Esta suíte não compila TLPP e não executa a consulta SQL no banco.
-## Atividade anterior
+## Agente Desenvolvedor de Software
 
-O prompt do agente e a API fictícia gerada na atividade anterior estão em [atividade-anterior](atividade-anterior/):
+O prompt do agente e a API fictícia gerada na atividade anterior estão em [agente Desenvolvedor de Software](<agente Desenvolvedor de Software/>):
 
-- [prompt-agente-desenvolvedor.md](atividade-anterior/prompt-agente-desenvolvedor.md)
-- [produtosfornecedor.tlpp](atividade-anterior/produtosfornecedor.tlpp)
+- [prompt-agente-desenvolvedor.md](<agente Desenvolvedor de Software/prompt-agente-desenvolvedor.md>)
+- [produtosfornecedor.tlpp](<agente Desenvolvedor de Software/produtosfornecedor.tlpp>)
 
 O fonte consulta `GET /protheus/com/produtosfornecedor`. Ele usa somente a massa e o token de teste da Aurora.
