@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <title>Unidade III — testes de integra??o — copiar e colar</title>
+  <style>
+    body { margin: 0; font-family: "Segoe UI", Arial, sans-serif; background: #eef1f4; color: #1f2933; }
+    .barra { position: sticky; top: 0; background: #3d2b7a; color: #fff; padding: 14px 24px; display: flex; gap: 16px; align-items: center; justify-content: space-between; }
+    .barra p { margin: 0; font-size: 14px; line-height: 1.4; }
+    button { background: #fff; color: #3d2b7a; border: 0; border-radius: 6px; padding: 10px 16px; font-weight: 700; cursor: pointer; font-size: 14px; }
+    #aviso { display: none; margin-left: 12px; font-weight: 700; }
+    article { max-width: 920px; margin: 24px auto 48px; background: #fff; padding: 36px 42px; border: 1px solid #d9dee5; }
+    h1 { font-size: 24px; margin: 0 0 18px; color: #2b2148; }
+    h2 { font-size: 18px; margin: 28px 0 10px; color: #3d2b7a; border-bottom: 1px solid #e4e7ec; padding-bottom: 4px; }
+    p, li { font-size: 15px; line-height: 1.55; }
+    a { color: #3d2b7a; }
+    table { width: 100%; border-collapse: collapse; margin: 12px 0 18px; font-size: 14px; }
+    th, td { border: 1px solid #c5ced8; padding: 8px 10px; text-align: left; vertical-align: top; }
+    th { background: #f3f0fa; }
+  </style>
+</head>
+<body>
+  <div class="barra">
+    <p>Clique em Copiar. No f?rum da Unidade III, apague o que estiver na mensagem e cole com Ctrl+V. A faixa roxa n?o entra na c?pia.</p>
+    <div>
+      <button type="button" onclick="copiar()">Copiar resposta</button>
+      <span id="aviso">Copiado. Cole no f?rum.</span>
+    </div>
+  </div>
+
+  <article id="resposta">
+    <h1>Testes de integra??o na consulta de produtos do fornecedor</h1>
+    <p>O cen?rio ? a integra??o entre dois componentes: o sistema externo de compras e a API fict?cia <code>GET /protheus/com/produtosfornecedor</code>, da Distribuidora Aurora Ltda. O compras envia token, p?gina e filtros. O ERP responde com o envelope <code>Code</code>, <code>Message</code> e <code>itens</code>. N?o h? token de produ??o, CNPJ nem dado de cliente.</p>
+    <p>Reposit?rio com os prompts e os casos gerados: <a href="https://github.com/FernandoAlemar/MC13-teste-GenAI">https://github.com/FernandoAlemar/MC13-teste-GenAI</a></p>
+
+    <h2>Dois tipos de prompt</h2>
+    <p>Usei dois tipos, os dois com uma vers?o vaga e uma vers?o ajustada.</p>
+    <ol>
+      <li><strong>Contrato de integra??o.</strong> Pede o caminho esperado da comunica??o: quem chama, o que envia, o c?digo HTTP, a mensagem e quais produtos voltam. Cobre p?gina, descri??o, per?odo e o produto sem pre?o, que permanece na resposta.</li>
+      <li><strong>Erro, limite e dados de teste.</strong> Pede a massa fict?cia e a fronteira: token ausente, divergente ou n?o configurado, JSON inv?lido, filial e loja inv?lidas, p?gina de 100 e de 101 linhas, per?odo de 365 e de 366 dias, descri??o com 3 e com 2 caracteres, produto inativo e item de outra loja.</li>
+    </ol>
+
+    <h2>Como cada prompt influenciou os casos</h2>
+    <p>O prompt vago, “gere testes de integra??o de uma API de produtos”, produziu pouca diversidade ?til. Os casos foram timeout, login e CRUD. N?o havia filial, loja, envelope nem a regra do produto inativo. A qualidade era baixa porque o caso n?o dizia o resultado verific?vel.</p>
+    <p>O prompt de contrato, j? com entradas, sa?das e a massa da Aurora, mudou a diversidade do fluxo. Passaram a existir a p?gina inicial com os tr?s ativos, a segunda p?gina s? com o ?leo, o filtro <code>fei</code> no per?odo de setembro a outubro e a consulta pelo c?digo <code>AUR-OLEO-900</code>, com pre?o de venda 0 e custo standard 0. O inativo e o item da loja 02 ficaram de fora. S?o quatro casos de comunica??o, n?o uma lista gen?rica de API.</p>
+    <p>O prompt de erro e limite mudou a diversidade da falha. A vers?o ainda gen?rica devolvia “dados inv?lidos” e “n?o autorizado”, sem separar 400, 401 e 403. A vers?o ajustada fixou dezesseis casos: o valor aceito e o primeiro recusado (100 e 101 linhas, 365 e 366 dias, descri??o com 3 e com 2 caracteres), a p?gina vazia em 404, e as falhas de token, JSON, filial, loja, fornecedor, data, produto inativo e loja trocada. A qualidade subiu porque cada linha tem situa??o, c?digo e mensagem.</p>
+
+    <h2>Ajustes que foram necess?rios</h2>
+    <p>Tr?s ajustes tornaram o resultado utiliz?vel.</p>
+    <ul>
+      <li>Colar o contrato no prompt. Sem filial, loja, massa e regras do inativo e do pre?o zero, a LLM inventa outro sistema.</li>
+      <li>Exigir, em todo caso, quem chama, o que envia, o <code>Code</code>, a <code>Message</code> e, no sucesso, a lista de <code>codigoProduto</code>. Sem esses campos, a resposta descreve o cen?rio e n?o vira teste.</li>
+      <li>Separar os tipos de prompt. Um ?nico pedido mistura o caminho feliz com o erro e perde a fronteira. O de contrato n?o pede falha. O de erro n?o repete o sucesso, exceto o par aceito e recusado do limite.</li>
+    </ul>
+    <p>Tamb?m ficou expl?cito o que a su?te n?o faz: n?o compila o TLPP e n?o executa a consulta SQL no banco. Os casos provam o contrato da fronteira HTTP. Um teste que olhasse s? o c?digo 200 seria insuficiente, porque continuaria verde se o produto inativo viesse junto com os tr?s ativos.</p>
+  </article>
+
+  <script>
+    function copiar() {
+      var article = document.getElementById("resposta");
+      var range = document.createRange();
+      range.selectNodeContents(article);
+      var sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+      var ok = document.execCommand("copy");
+      sel.removeAllRanges();
+      var aviso = document.getElementById("aviso");
+      aviso.style.display = "inline";
+      aviso.textContent = ok ? "Copiado. Cole no f?rum com Ctrl+V." : "Selecione o texto branco e copie com Ctrl+C.";
+    }
+  </script>
+</body>
+</html>
